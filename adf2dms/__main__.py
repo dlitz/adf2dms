@@ -69,6 +69,14 @@ def parse_args():
 def main():
     args, parser = parse_args()
 
+    if args.banner is not None:
+        with open(args.banner, "rb") as infile:
+            banner_content = infile.read()
+
+    if args.fileid is not None:
+        with open(args.fileid, "rb") as infile:
+            fileid_content = infile.read()
+
     if args.gunzip:
         infile = gzip.open(args.infile, 'rb')
     else:
@@ -80,14 +88,14 @@ def main():
             outfile = open(args.outfile, 'wb' if args.force_overwrite else 'xb')
         try:
             with outfile:
-                process_file(infile, outfile, args=args, parser=parser)
+                process_file(infile, outfile, args=args, parser=parser, banner=banner_content, fileid=fileid_content)
         except:
             # Remove output file when there is an error
             if args.outfile is not None:
                 args.outfile.unlink()
             raise
 
-def process_file(infile, outfile, *, args, parser):
+def process_file(infile, outfile, *, args, parser, banner=None, fileid=None):
     time_start = monotonic()
 
     # Get file creation date
@@ -141,6 +149,11 @@ def process_file(infile, outfile, *, args, parser):
         'compression_mode': args.cmode,
     }
 
+    if banner:
+        header['info_bits'] |= InfoBits.BANNER
+    if fileid:
+        header['info_bits'] |= InfoBits.FILE_ID_DIZ
+
     with BytesIO() as infohdr:
         infohdr.write(b"\0\0\0\0")  # header (?)
         infohdr.write(pack("!L", header['info_bits']))
@@ -175,19 +188,17 @@ def process_file(infile, outfile, *, args, parser):
 
     outfile.write(file_header)
 
-    if args.banner is not None:
-        with open(args.banner, "rb") as txtfile:
-            track_header, packed_data = pack_track(txtfile.read(), SpecialTrackNum.BANNER, cmode=Cmode.NOCOMP)
-            outfile.write(track_header)
-            outfile.write(packed_data)
+    if banner is not None:
+        track_header, packed_data = pack_track(banner, SpecialTrackNum.BANNER, cmode=Cmode.NOCOMP)
+        outfile.write(track_header)
+        outfile.write(packed_data)
 
     outfile.write(outpayload)
 
-    if args.fileid is not None:
-        with open(args.fileid, "rb") as txtfile:
-            track_header, packed_data = pack_track(txtfile.read(), SpecialTrackNum.FILE_ID_DIZ, cmode=Cmode.NOCOMP)
-            outfile.write(track_header)
-            outfile.write(packed_data)
+    if fileid is not None:
+        track_header, packed_data = pack_track(fileid, SpecialTrackNum.FILE_ID_DIZ, cmode=Cmode.NOCOMP)
+        outfile.write(track_header)
+        outfile.write(packed_data)
 
 if __name__ == '__main__':
     main()
