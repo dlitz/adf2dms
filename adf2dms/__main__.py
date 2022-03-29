@@ -6,15 +6,19 @@ from itertools import count
 from pathlib import Path
 from struct import pack, unpack
 from time import time, monotonic
+import gzip
 import os
 import sys
 
 from .checksum import crc16, checksum
-from .enums import Cmode, InfoBits, MachineCPU, CPUCopro, MachineType, DisketteType
+from .enums import Cmode, InfoBits, MachineCPU, CPUCopro, MachineType, DisketteType, SpecialTrackNum
 from .rle import rle_compress, rle_decompress
 
 # Ref: http://lclevy.free.fr/amiga/DMS.txt
 # Ref: http://fileformats.archiveteam.org/wiki/Disk_Masher_System
+
+track_length = 11264
+file_header_length = 0x38
 
 def pack_trackheader(tracknumber, cmode_packed_length, runtime_packed_length, unpacked_length, cflag, cmode, usum, dcrc):
     unused = 0
@@ -23,29 +27,53 @@ def pack_trackheader(tracknumber, cmode_packed_length, runtime_packed_length, un
     hcrc = crc16(th)
     return th + pack("!H", hcrc)
 
-track_length = 11264
-file_header_length = 0x38
+def pack_track(unpacked_data, track_num, *, cmode):
+    usum = checksum(unpacked_data)
+    ulength = len(unpacked_data)
+
+    if cmode == Cmode.NOCOMP:
+        packed_data = unpacked_data
+    elif cmode == Cmode.SIMPLE:
+        packed_data = rle_compress(unpacked_data)
+    else:
+        raise NotImplementedError(f"Compression mode: {cmode!r}")
+
+    plength = len(packed_data)
+    if plength >= ulength:
+        cmode = Cmode.NOCOMP
+        packed_data = unpacked_data
+        plength = ulength
+
+    dcrc = crc16(packed_data)
+    track_header = pack_trackheader(track_num, plength, plength, ulength, 0, cmode, usum, dcrc)
+    return track_header, packed_data
 
 def parse_args():
     parser = ArgumentParser(description='Convert an ADF file to DMS (DiskMasher) format')
     g = parser.add_mutually_exclusive_group()
     g.add_argument('-0', '--store', action='store_true', help='store tracks uncompressed')
-    #parser.add_argument('-b', '--banner', metavar='FILE', type=Path, help='attach banner file')
-    #parser.add_argument('-d', '--fileid-diz', metavar='FILE', type=Path, help='attach FILE_ID.DIZ file')
+    parser.add_argument('-a', '--fileid', metavar='FILE', type=Path, help='attach FILE_ID.DIZ file')
+    parser.add_argument('-b', '--banner', metavar='FILE', type=Path, help='attach banner file')
     parser.add_argument('-f', '--force-overwrite', action='store_true', help='overwrite output file if it already exists')
     parser.add_argument('-o', '--output', dest='outfile', metavar='file.dms', type=Path, help='DMS file to create instead of stdout')
     parser.add_argument('infile', metavar='file.adf', type=Path, help='ADF file to read')
+    parser.epilog = "Input files ending in .adz or .gz will automatically be un-gzipped."
 
     args = parser.parse_args()
     args.cmode = Cmode.NOCOMP if args.store else Cmode.SIMPLE
     #if args.outfile is None:
     #    args.outfile = args.infile.with_suffix('.dms')
+    args.gunzip = args.infile.suffix.lower() in ('.adz', '.gz')
     return args, parser
 
 def main():
     args, parser = parse_args()
 
-    with open(args.infile, "rb") as infile:
+    if args.gunzip:
+        infile = gzip.open(args.infile, 'rb')
+    else:
+        infile = open(args.infile, 'rb')
+    with infile:
         if args.outfile is None:
             outfile = open(sys.stdout.fileno(), 'wb')
         else:
@@ -76,30 +104,13 @@ def process_file(infile, outfile, *, args, parser):
             if not unpacked_data:
                 break
             assert len(unpacked_data) == track_length
-            usum = checksum(unpacked_data)
-            ulength = len(unpacked_data)
 
-            cmode = args.cmode
-            if cmode == Cmode.NOCOMP:
-                packed_data = unpacked_data
-            elif cmode == Cmode.SIMPLE:
-                packed_data = rle_compress(unpacked_data)
-            else:
-                raise NotImplementedError(f"Compression mode: {cmode!r}")
-
-            plength = len(packed_data)
-            if plength >= ulength:
-                cmode = Cmode.NOCOMP
-                packed_data = unpacked_data
-                plength = ulength
-
-            dcrc = crc16(packed_data)
-            track_header = pack_trackheader(track_num, plength, plength, ulength, 0, cmode, usum, dcrc)
+            track_header, packed_data = pack_track(unpacked_data, track_num, cmode=args.cmode)
             outstream.write(track_header)
             outstream.write(packed_data)
 
-            total_unpacked_size += ulength
-            total_packed_size += plength
+            total_unpacked_size += len(unpacked_data)
+            total_packed_size += len(packed_data)
             num_tracks += 1
 
         outpayload = outstream.getvalue()
@@ -163,7 +174,20 @@ def process_file(infile, outfile, *, args, parser):
         parser.error("Cowardly refusing to write binary data to a terminal")
 
     outfile.write(file_header)
+
+    if args.banner is not None:
+        with open(args.banner, "rb") as txtfile:
+            track_header, packed_data = pack_track(txtfile.read(), SpecialTrackNum.BANNER, cmode=Cmode.NOCOMP)
+            outfile.write(track_header)
+            outfile.write(packed_data)
+
     outfile.write(outpayload)
+
+    if args.fileid is not None:
+        with open(args.fileid, "rb") as txtfile:
+            track_header, packed_data = pack_track(txtfile.read(), SpecialTrackNum.FILE_ID_DIZ, cmode=Cmode.NOCOMP)
+            outfile.write(track_header)
+            outfile.write(packed_data)
 
 if __name__ == '__main__':
     main()
