@@ -1,4 +1,5 @@
-# adf2dms - Converts an ADF file to DMS (DiskMasher) format
+# adf2dms
+Convert Amiga disk images from ADF to DMS (DiskMasher) format
 
 ## Note: Experimental software
 
