@@ -1,31 +1,20 @@
 #!/usr/bin/env python3
 # dlitz 2022
-from crccheck.crc import Crc16Arc
-from enum import IntEnum
+from argparse import ArgumentParser
 from io import BytesIO
 from itertools import count
 from pathlib import Path
-from .rle import rle_compress, rle_decompress
 from struct import pack, unpack
 from time import time, monotonic
 import os
+import sys
 
-crc16 = Crc16Arc.calc
+from .checksum import crc16, checksum
+from .enums import Cmode, InfoBits, MachineCPU, CPUCopro, MachineType, DisketteType
+from .rle import rle_compress, rle_decompress
 
 # Ref: http://lclevy.free.fr/amiga/DMS.txt
 # Ref: http://fileformats.archiveteam.org/wiki/Disk_Masher_System
-
-class Cmode(IntEnum):
-    NOCOMP  = 0     # no compression
-    SIMPLE  = 1     # RLE
-    #QUICK   = 2
-    #MEDIUM  = 3
-    #DEEP    = 4
-    #HEAVY1  = 5
-    #HEAVY2  = 6
-    #HEAVY3  = 7
-    #HEAVY4  = 8
-    #HEAVY5  = 9
 
 def pack_trackheader(tracknumber, cmode_packed_length, runtime_packed_length, unpacked_length, cflag, cmode, usum, dcrc):
     unused = 0
@@ -35,47 +24,51 @@ def pack_trackheader(tracknumber, cmode_packed_length, runtime_packed_length, un
     return th + pack("!H", hcrc)
 
 track_length = 11264
+file_header_length = 0x38
 
-#with open("samples/3713.adf", "rb") as infile, open("out.dms", "wb") as outfile:
-#    # Get file creation date
-#    st = os.fstat(infile.fileno())
-#    timecreate = int(st.st_mtime)
-#
-#    unpackedsize = st.st_size
-#    assert unpackedsize % track_length == 0, (unpackedsize, divmod(unpackedsize, track_length))
-#    num_tracks = unpackedsize // track_length
-#
-#    infobits = 0
-#    lowtrack = 0
-#    hightrack = num_tracks - 1
-#
-#    outfile.write(b"DMS!")      # IDENTIFIER
-#    outfile.write(b"\0\0\0\0")  # header (?)
-#    outfile.write(pack("!L", infobits))  # Infobits (?)
-#    outfile.write(pack("!L", timecreate))
-#    outfile.write(pack("!H", lowtrack))
-#    outfile.write(pack("!H", hightrack))
-#    outfile.write(pack("!L", packedsize))
-#    outfile.write(pack("!L", unpackedsize))
-#
-#    outfile.write(pack("!I", 0))
-#    outfile.write(pack("!I", 0))
+def parse_args():
+    parser = ArgumentParser(description='Convert an ADF file to DMS (DiskMasher) format')
+    g = parser.add_mutually_exclusive_group()
+    g.add_argument('-0', '--store', action='store_true', help='store tracks uncompressed')
+    #parser.add_argument('-b', '--banner', metavar='FILE', type=Path, help='attach banner file')
+    #parser.add_argument('-d', '--fileid-diz', metavar='FILE', type=Path, help='attach FILE_ID.DIZ file')
+    parser.add_argument('-f', '--force-overwrite', action='store_true', help='overwrite output file if it already exists')
+    parser.add_argument('-o', '--output', dest='outfile', metavar='file.dms', type=Path, help='DMS file to create instead of stdout')
+    parser.add_argument('infile', metavar='file.adf', type=Path, help='ADF file to read')
 
-def read_info_header(infile):
-    magic = infile.read(4)
-    if magic != b'DMS!':
-        raise ValueError("not a DMS file")
-    ih = infile.read(0x32)
-    ihcrc = infile.read(2)
-    (expected_crc,) = unpack("!H", ihcrc)
-    computed_crc = crc16(ih)
-    if expected_crc != computed_crc:
-        raise ValueError(f"header CRC error: {expected_crc=:04X} computed: {computed_crc=:04X}")
-    return magic + ih + ihcrc
+    args = parser.parse_args()
+    args.cmode = Cmode.NOCOMP if args.store else Cmode.SIMPLE
+    #if args.outfile is None:
+    #    args.outfile = args.infile.with_suffix('.dms')
+    return args, parser
 
-time_start = monotonic()
-with open("samples/3713.adf", "rb") as infile:
+def main():
+    args, parser = parse_args()
+
+    with open(args.infile, "rb") as infile:
+        if args.outfile is None:
+            outfile = open(sys.stdout.fileno(), 'wb')
+        else:
+            outfile = open(args.outfile, 'wb' if args.force_overwrite else 'xb')
+        try:
+            with outfile:
+                process_file(infile, outfile, args=args, parser=parser)
+        except:
+            # Remove output file when there is an error
+            if args.outfile is not None:
+                args.outfile.unlink()
+            raise
+
+def process_file(infile, outfile, *, args, parser):
+    time_start = monotonic()
+
+    # Get file creation date
+    st = os.fstat(infile.fileno())
+    date = int(st.st_mtime)
+
     total_unpacked_size = 0
+    total_packed_size = 0
+    num_tracks = 0
 
     with BytesIO() as outstream:
         for track_num in count():
@@ -83,79 +76,94 @@ with open("samples/3713.adf", "rb") as infile:
             if not unpacked_data:
                 break
             assert len(unpacked_data) == track_length
-
-
-            packed_data = rle_compress(unpacked_data)
-            usum = crc16(unpacked_data)
-            dcrc = crc16(packed_data)
+            usum = checksum(unpacked_data)
             ulength = len(unpacked_data)
-            plength = len(packed_data)
-            if plength > ulength:
-                track_header = pack_trackheader(track_num, ulength, ulength, ulength, 0, Cmode.NOCOMP, usum, usum)
-                outstream.write(track_header)
-                outstream.write(unpacked_data)
+
+            cmode = args.cmode
+            if cmode == Cmode.NOCOMP:
+                packed_data = unpacked_data
+            elif cmode == Cmode.SIMPLE:
+                packed_data = rle_compress(unpacked_data)
             else:
-                track_header = pack_trackheader(track_num, plength, plength, ulength, 0, Cmode.SIMPLE, usum, dcrc)
-                outstream.write(track_header)
-                outstream.write(packed_data)
+                raise NotImplementedError(f"Compression mode: {cmode!r}")
+
+            plength = len(packed_data)
+            if plength >= ulength:
+                cmode = Cmode.NOCOMP
+                packed_data = unpacked_data
+                plength = ulength
+
+            dcrc = crc16(packed_data)
+            track_header = pack_trackheader(track_num, plength, plength, ulength, 0, cmode, usum, dcrc)
+            outstream.write(track_header)
+            outstream.write(packed_data)
+
             total_unpacked_size += ulength
+            total_packed_size += plength
+            num_tracks += 1
 
         outpayload = outstream.getvalue()
-        total_packed_size = len(outpayload)
 
-    ## Make file header
+    time_end = monotonic()
+    timecreate = int(time_end - time_start)  # seconds needed to create archive
 
-    # Get file creation date
-    st = os.fstat(infile.fileno())
-    date = int(st.st_mtime)
+    assert total_unpacked_size == num_tracks * track_length
 
-    assert total_unpacked_size % track_length == 0, (total_unpacked_size, divmod(total_unpacked_size, track_length))
-    num_tracks = total_unpacked_size // track_length
-
-    infobits = 0
     lowtrack = 0
     hightrack = num_tracks - 1
 
-    file_header_length = 0x38
+    ## Make file header
+    header = {
+        'info_bits': InfoBits(0),
+        'date': date,
+        'os_version': 0,
+        'os_revision': 0,
+        'machine_cpu': MachineCPU.M68000,
+        'cpu_copro': CPUCopro.NONE,
+        'machine_type': MachineType.UNKNOWN,
+        'diskette_type2': DisketteType.UNKNOWN,
+        'diskette_type': DisketteType.AMIGA_OS1_OFS,
+        'cpu_speed': 0,     # increments of 10 kHz, e.g. 2500 = 25.00 MHz
+        'time_elapsed': timecreate,
+        'version_creator': 112,     # 1.12
+        'version_needed': 111,      # 1.11
+        'compression_mode': args.cmode,
+    }
 
-    with open("out.dms", "wb") as outfile:
-        outfile.seek(file_header_length)
-        outfile.write(outpayload)
-        outfile.seek(0)
-        outfile.flush()
-        #os.fdatasync(outfile.fileno())
+    with BytesIO() as infohdr:
+        infohdr.write(b"\0\0\0\0")  # header (?)
+        infohdr.write(pack("!L", header['info_bits']))
+        infohdr.write(pack("!L", header['date']))
+        infohdr.write(pack("!H", lowtrack))
+        infohdr.write(pack("!H", hightrack))
+        infohdr.write(pack("!L", total_packed_size))
+        infohdr.write(pack("!L", total_unpacked_size))
 
-        time_end = monotonic()
-        timecreate = int(time_end - time_start)     # seconds needed to create archive
+        infohdr.write(pack("!H", header['os_version']))
+        infohdr.write(pack("!H", header['os_revision']))
+        infohdr.write(pack("!H", header['machine_cpu']))
+        infohdr.write(pack("!H", header['cpu_copro']))
+        infohdr.write(pack("!H", header['machine_type']))
+        infohdr.write(pack("!H", header['diskette_type2']))
+        infohdr.write(pack("!H", header['cpu_speed']))    # int(speed_in_mhz * 100)
 
-        with BytesIO() as infohdr:
-            infohdr = BytesIO()
-            infohdr.write(b"\0\0\0\0")  # header (?)
-            infohdr.write(pack("!L", infobits))  # Infobits (?)
-            infohdr.write(pack("!L", date))
-            infohdr.write(pack("!H", lowtrack))
-            infohdr.write(pack("!H", hightrack))
-            infohdr.write(pack("!L", total_packed_size))        # TODO
-            infohdr.write(pack("!L", total_unpacked_size))
+        infohdr.write(pack("!L", header['time_elapsed']))   # Timecreate
 
-            infohdr.write(pack("!H", 0))    # OS_Version
-            infohdr.write(pack("!H", 0))    # OS_REVISION
-            infohdr.write(pack("!H", 4))    # MachineCPU    # XXX
-            infohdr.write(pack("!H", 2))    # CPUcopro      # XXX
-            infohdr.write(pack("!H", 1))    # MachineType   # XXX
-            infohdr.write(pack("!H", 0))    # DisketteType2
-            infohdr.write(pack("!H", 0))    # CPUmhz
+        infohdr.write(pack("!H", header['version_creator']))
+        infohdr.write(pack("!H", header['version_needed']))
+        infohdr.write(pack("!H", header['diskette_type']))
+        infohdr.write(pack("!H", header['compression_mode']))
 
-            infohdr.write(pack("!L", timecreate))   # Timecreate
+        ih = infohdr.getvalue()
 
-            infohdr.write(pack("!H", 0x70))            # VersionCreator #XXX
-            infohdr.write(pack("!H", 0x6f))            # VersionNeeded     # XXX
-            infohdr.write(pack("!H", 1))               # DisketteType  # XXX
-            infohdr.write(pack("!H", Cmode.SIMPLE))    # CompressionMode
+    file_header = b"DMS!" + ih + pack("!H", crc16(ih))
+    assert len(file_header) == file_header_length
 
-            ih = infohdr.getvalue()
+    if os.isatty(outfile.fileno()):
+        parser.error("Cowardly refusing to write binary data to a terminal")
 
-        outfile.write(b"DMS!")      # IDENTIFIER
-        outfile.write(ih)
-        outfile.write(pack("!H", crc16(ih)))
-        assert outfile.tell() == file_header_length, outfile.tell()
+    outfile.write(file_header)
+    outfile.write(outpayload)
+
+if __name__ == '__main__':
+    main()

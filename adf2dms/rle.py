@@ -1,91 +1,51 @@
 # dlitz 2022
 from struct import pack
+import re
 
-def _rle_decompress(inp):
-    # RLE marker is 90 FF
-    it = iter(inp)
-    for a in it:
-        if a != 0x90:
-            yield a
-            continue
+# value is 0x90:
+#   0: BYTE 0x90
+#   1: BYTE 0x00
+# run length 1 and value is not 0x90:
+#   0: BYTE <value>
+# run length less than 255:
+#   0: BYTE 0x90
+#   1: BYTE <run_length>
+#   2: BYTE <value>
+# run length less than 65536:
+#   0: BYTE 0x90
+#   1: BYTE 0xff
+#   2: BYTE <value>
+#   3: WORD <run_length>
 
-        try:
-            b = next(it)
-        except StopIteration:
-            yield a
-            break
+_rle_compress_regex = re.compile(rb'\x90{1,65535}|([^\x90])\1{2,65534}', re.S)
 
-        if b != 0xff:
-            yield a
-            yield b
-            continue
-
-        # Got 90 FF.  Next 3 bytes are: value, run_length
-        try:
-            v = next(it)
-            c = next(it)
-            d = next(it)
-        except StopIteration:
-            raise EOFError
-        run_length = (c << 8) | d
-
-        yield from [v] * run_length
-
-RLE_ESCAPE = object()   # sentinel
-
-def _rle_escape(inp):
-    it = iter(inp)
-    for a in it:
-        if a != 0x90:
-            yield a
-            continue
-        try:
-            b = next(it)
-        except StopIteration:
-            yield a
-            break
-        if b != 0xff:
-            yield a
-            yield b
-            continue
-        yield RLE_ESCAPE
-
-def _rle_counts(inp):
-    it = iter(inp)
-    prev = None
-    prev_count = 0
-    def flush():
-        nonlocal prev, prev_count
-        if prev_count:
-            yield (prev, prev_count)
-            prev = None
-            prev_count = 0
-    for a in it:
-        if a is RLE_ESCAPE:
-            yield from flush()
-            yield (RLE_ESCAPE, 1)
-        elif a == prev:
-            prev_count += 1
+def rle_compress(inbuf):
+    def replacement(m):
+        value = m[0][0]
+        run_length = len(m[0])
+        if run_length == 1 and value == 0x90:
+            return b'\x90\x00'
+        elif run_length < 255:
+            return bytes((0x90, run_length, value))
         else:
-            yield from flush()
-            prev = a
-            prev_count = 1
-    yield from flush()
+            return pack("!BBBH", 0x90, 0xff, value, run_length)
+    return _rle_compress_regex.sub(replacement, inbuf)
 
-def _rle_compress(inp):
-    it = iter(_rle_counts(_rle_escape(inp)))
-    for a, n in it:
-        if a is RLE_ESCAPE:
-            assert n == 1
-            yield from pack("!HBH", 0x90ff, 0x90, 1)
-            yield 0xff
-        elif n < 6:
-            yield from [a] * n
+_rle_decompress_regex = re.compile(rb'(\x90\x00)|\x90\xff(.)(..)|\x90([^\xff\x00])(.)', re.S)
+
+def rle_decompress(inbuf):
+    def replacement(m):
+        if m[1]:
+            return b'\x90'
+        elif m[2]:
+            value = m[2]
+            a, b = m[3]
+            run_length = (a << 8) | b
+            return value * run_length
+        elif m[4]:
+            (run_length,) = m[4]
+            value = m[5]
+            return value * run_length
         else:
-            yield from pack("!HBH", 0x90ff, a, n)
-
-def rle_compress(buf):
-    return bytes(_rle_compress(buf))
-
-def rle_decompress(buf):
-    return bytes(_rle_decompress(buf))
+            assert 0, "BUG"
+    return _rle_decompress_regex.sub(replacement, inbuf)
