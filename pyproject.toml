@@ -1,0 +1,7 @@
+[build-system]
+# Keep in sync with requirements in setup.cfg
+requires = [
+    "setuptools",
+    "wheel",
+]
+build-backend = "setuptools.build_meta"
