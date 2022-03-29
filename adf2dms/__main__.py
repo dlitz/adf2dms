@@ -50,12 +50,15 @@ def pack_track(unpacked_data, track_num, *, cmode):
 
 def parse_args():
     parser = ArgumentParser(description='Convert an ADF file to DMS (DiskMasher) format')
-    g = parser.add_mutually_exclusive_group()
-    g.add_argument('-0', '--store', action='store_true', help='store tracks uncompressed')
+    parser.add_argument('-0', '--store', action='store_true', help='store tracks uncompressed')
     parser.add_argument('-a', '--fileid', metavar='FILE', type=Path, help='attach FILE_ID.DIZ file')
     parser.add_argument('-b', '--banner', metavar='FILE', type=Path, help='attach banner file')
     parser.add_argument('-f', '--force-overwrite', action='store_true', help='overwrite output file if it already exists')
     parser.add_argument('-o', '--output', dest='outfile', metavar='file.dms', type=Path, help='DMS file to create instead of stdout')
+    parser.add_argument('-s', '--low-track', metavar='TRKNUM', type=int, default=0, help='first track, default: %(default)s')
+    g = parser.add_mutually_exclusive_group()
+    g.add_argument('-e', '--high-track', metavar='TRKNUM', type=int, help='last track, default: determined by file length')
+    g.add_argument('-n', '--num-tracks', metavar='COUNT', type=int, help='number of tracks to add, default: determined by file length')
     parser.add_argument('infile', metavar='file.adf', type=Path, help='ADF file to read')
     parser.epilog = "Input files ending in .adz or .gz will automatically be un-gzipped."
 
@@ -113,6 +116,13 @@ def process_file(infile, outfile, *, args, parser, banner=None, fileid=None):
                 break
             assert len(unpacked_data) == track_length
 
+            if track_num < args.low_track:
+                continue
+            if args.high_track is not None and track_num > args.high_track:
+                break
+            elif args.num_tracks is not None and num_tracks >= args.num_tracks:
+                break
+
             track_header, packed_data = pack_track(unpacked_data, track_num, cmode=args.cmode)
             outstream.write(track_header)
             outstream.write(packed_data)
@@ -128,8 +138,8 @@ def process_file(infile, outfile, *, args, parser, banner=None, fileid=None):
 
     assert total_unpacked_size == num_tracks * track_length
 
-    lowtrack = 0
-    hightrack = num_tracks - 1
+    lowtrack = args.low_track
+    hightrack = lowtrack + num_tracks - 1
 
     ## Make file header
     header = {
