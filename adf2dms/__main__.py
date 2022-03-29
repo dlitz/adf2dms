@@ -72,11 +72,15 @@ def parse_args():
 def main():
     args, parser = parse_args()
 
-    if args.banner is not None:
+    if args.banner is None:
+        banner_content = None
+    else:
         with open(args.banner, "rb") as infile:
             banner_content = infile.read()
 
-    if args.fileid is not None:
+    if args.fileid is None:
+        fileid_content = None
+    else:
         with open(args.fileid, "rb") as infile:
             fileid_content = infile.read()
 
